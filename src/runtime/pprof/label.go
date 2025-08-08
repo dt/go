@@ -42,13 +42,28 @@ type labelMap struct {
 // String satisfies Stringer and returns key, value pairs in a consistent
 // order.
 func (l *labelMap) String() string {
-	if l == nil {
+	return labelsString(l)
+}
+
+func labelsString(l *labelMap, extra ...string) string {
+	if l == nil && len(extra) == 0 {
 		return ""
 	}
-	keyVals := make([]string, 0, len(l.list))
 
-	for _, lbl := range l.list {
-		keyVals = append(keyVals, fmt.Sprintf("%q:%q", lbl.key, lbl.value))
+	length := len(extra)
+	if l != nil {
+		length += len(l.list)
+	}
+	keyVals := make([]string, 0, length)
+
+	if l != nil {
+		for _, lbl := range l.list {
+			keyVals = append(keyVals, fmt.Sprintf("%q:%q", lbl.key, lbl.value))
+		}
+	}
+
+	for i := 0; i < len(extra)-1; i += 2 {
+		keyVals = append(keyVals, fmt.Sprintf("%q:%q", extra[i], extra[i+1]))
 	}
 
 	slices.Sort(keyVals)

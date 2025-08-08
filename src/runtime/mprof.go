@@ -1246,25 +1246,15 @@ func pprof_threadCreateInternal(p []profilerecord.StackRecord) (n int, ok bool) 
 }
 
 //go:linkname pprof_goroutineProfileWithLabels
-func pprof_goroutineProfileWithLabels(p []profilerecord.StackRecord, labels []unsafe.Pointer) (n int, ok bool) {
-	return goroutineProfileWithLabels(p, labels)
-}
-
-// labels may be nil. If labels is non-nil, it must have the same length as p.
-func goroutineProfileWithLabels(p []profilerecord.StackRecord, labels []unsafe.Pointer) (n int, ok bool) {
-	if labels != nil && len(labels) != len(p) {
-		labels = nil
-	}
-
-	return goroutineProfileWithLabelsConcurrent(p, labels)
+func pprof_goroutineProfileWithLabels(p []profilerecord.GoroutineRecord) (n int, ok bool) {
+	return goroutineProfileInternal(p)
 }
 
 var goroutineProfile = struct {
 	sema    uint32
 	active  bool
 	offset  atomic.Int64
-	records []profilerecord.StackRecord
-	labels  []unsafe.Pointer
+	records []profilerecord.GoroutineRecord
 }{
 	sema: 1,
 }
@@ -1302,7 +1292,9 @@ func (p *goroutineProfileStateHolder) CompareAndSwap(old, new goroutineProfileSt
 	return (*atomic.Uint32)(p).CompareAndSwap(uint32(old), uint32(new))
 }
 
-func goroutineProfileWithLabelsConcurrent(p []profilerecord.StackRecord, labels []unsafe.Pointer) (n int, ok bool) {
+func goroutineProfileInternal(
+	p []profilerecord.GoroutineRecord,
+) (n int, ok bool) {
 	if len(p) == 0 {
 		// An empty slice is obviously too small. Return a rough
 		// allocation estimate without bothering to STW. As long as
@@ -1345,9 +1337,15 @@ func goroutineProfileWithLabelsConcurrent(p []profilerecord.StackRecord, labels 
 	systemstack(func() {
 		saveg(pc, sp, ourg, &p[0], pcbuf)
 	})
-	if labels != nil {
-		labels[0] = ourg.labels
-	}
+
+	p[0].ID = ourg.goid
+	p[0].CreatorID = ourg.parentGoid
+	p[0].CreationPC = ourg.gopc
+	p[0].Labels = ourg.labels
+	p[0].State = readgstatus(ourg) &^ _Gscan
+	p[0].WaitReason = uint8(ourg.waitreason)
+	p[0].WaitSince = ourg.waitsince
+
 	ourg.goroutineProfiled.Store(goroutineProfileSatisfied)
 	goroutineProfile.offset.Store(1)
 
@@ -1358,7 +1356,6 @@ func goroutineProfileWithLabelsConcurrent(p []profilerecord.StackRecord, labels 
 	// field set to goroutineProfileSatisfied.
 	goroutineProfile.active = true
 	goroutineProfile.records = p
-	goroutineProfile.labels = labels
 	startTheWorld(stw)
 
 	// Visit each goroutine that existed as of the startTheWorld call above.
@@ -1380,7 +1377,6 @@ func goroutineProfileWithLabelsConcurrent(p []profilerecord.StackRecord, labels 
 	endOffset := goroutineProfile.offset.Swap(0)
 	goroutineProfile.active = false
 	goroutineProfile.records = nil
-	goroutineProfile.labels = nil
 	startTheWorld(stw)
 
 	// Restore the invariant that every goroutine struct in allgs has its
@@ -1503,79 +1499,13 @@ func doRecordGoroutineProfile(gp1 *g, pcbuf []uintptr) {
 	// to avoid schedule delays.
 	systemstack(func() { saveg(^uintptr(0), ^uintptr(0), gp1, &goroutineProfile.records[offset], pcbuf) })
 
-	if goroutineProfile.labels != nil {
-		goroutineProfile.labels[offset] = gp1.labels
-	}
-}
-
-func goroutineProfileWithLabelsSync(p []profilerecord.StackRecord, labels []unsafe.Pointer) (n int, ok bool) {
-	gp := getg()
-
-	isOK := func(gp1 *g) bool {
-		// Checking isSystemGoroutine here makes GoroutineProfile
-		// consistent with both NumGoroutine and Stack.
-		return gp1 != gp && readgstatus(gp1) != _Gdead && !isSystemGoroutine(gp1, false)
-	}
-
-	pcbuf := makeProfStack() // see saveg() for explanation
-	stw := stopTheWorld(stwGoroutineProfile)
-
-	// World is stopped, no locking required.
-	n = 1
-	forEachGRace(func(gp1 *g) {
-		if isOK(gp1) {
-			n++
-		}
-	})
-
-	if n <= len(p) {
-		ok = true
-		r, lbl := p, labels
-
-		// Save current goroutine.
-		sp := sys.GetCallerSP()
-		pc := sys.GetCallerPC()
-		systemstack(func() {
-			saveg(pc, sp, gp, &r[0], pcbuf)
-		})
-		r = r[1:]
-
-		// If we have a place to put our goroutine labelmap, insert it there.
-		if labels != nil {
-			lbl[0] = gp.labels
-			lbl = lbl[1:]
-		}
-
-		// Save other goroutines.
-		forEachGRace(func(gp1 *g) {
-			if !isOK(gp1) {
-				return
-			}
-
-			if len(r) == 0 {
-				// Should be impossible, but better to return a
-				// truncated profile than to crash the entire process.
-				return
-			}
-			// saveg calls gentraceback, which may call cgo traceback functions.
-			// The world is stopped, so it cannot use cgocall (which will be
-			// blocked at exitsyscall). Do it on the system stack so it won't
-			// call into the schedular (see traceback.go:cgoContextPCs).
-			systemstack(func() { saveg(^uintptr(0), ^uintptr(0), gp1, &r[0], pcbuf) })
-			if labels != nil {
-				lbl[0] = gp1.labels
-				lbl = lbl[1:]
-			}
-			r = r[1:]
-		})
-	}
-
-	if raceenabled {
-		raceacquire(unsafe.Pointer(&labelSync))
-	}
-
-	startTheWorld(stw)
-	return n, ok
+	goroutineProfile.records[offset].Labels = gp1.labels
+	goroutineProfile.records[offset].ID = gp1.goid
+	goroutineProfile.records[offset].CreatorID = gp1.parentGoid
+	goroutineProfile.records[offset].CreationPC = gp1.gopc
+	goroutineProfile.records[offset].State = readgstatus(gp1) &^ _Gscan
+	goroutineProfile.records[offset].WaitReason = uint8(gp1.waitreason)
+	goroutineProfile.records[offset].WaitSince = gp1.waitsince
 }
 
 // GoroutineProfile returns n, the number of records in the active goroutine stack profile.
@@ -1585,7 +1515,7 @@ func goroutineProfileWithLabelsSync(p []profilerecord.StackRecord, labels []unsa
 // Most clients should use the [runtime/pprof] package instead
 // of calling GoroutineProfile directly.
 func GoroutineProfile(p []StackRecord) (n int, ok bool) {
-	records := make([]profilerecord.StackRecord, len(p))
+	records := make([]profilerecord.GoroutineRecord, len(p))
 	n, ok = goroutineProfileInternal(records)
 	if !ok {
 		return
@@ -1597,11 +1527,7 @@ func GoroutineProfile(p []StackRecord) (n int, ok bool) {
 	return
 }
 
-func goroutineProfileInternal(p []profilerecord.StackRecord) (n int, ok bool) {
-	return goroutineProfileWithLabels(p, nil)
-}
-
-func saveg(pc, sp uintptr, gp *g, r *profilerecord.StackRecord, pcbuf []uintptr) {
+func saveg(pc, sp uintptr, gp *g, r *profilerecord.GoroutineRecord, pcbuf []uintptr) {
 	// To reduce memory usage, we want to allocate a r.Stack that is just big
 	// enough to hold gp's stack trace. Naively we might achieve this by
 	// recording our stack trace into mp.profStack, and then allocating a

@@ -4792,7 +4792,6 @@ func exitsyscall() {
 		throw("exitsyscall: syscall frame is no longer valid")
 	}
 
-	gp.waitsince = 0
 	oldp := gp.m.oldp.ptr()
 	gp.m.oldp = 0
 	if exitsyscallfast(oldp) {
@@ -4806,6 +4805,7 @@ func exitsyscall() {
 				tryRecordGoroutineProfileWB(gp)
 			})
 		}
+		gp.waitsince = 0
 		trace := traceAcquire()
 		if trace.ok() {
 			lostP := oldp != gp.m.p.ptr() || gp.m.syscalltick != gp.m.p.ptr().syscalltick
@@ -4867,6 +4867,10 @@ func exitsyscall() {
 	gp.syscallsp = 0
 	gp.m.p.ptr().syscalltick++
 	gp.throwsplit = false
+
+	// NB: we do not reset gp.waitsince in this branch as we have not yet checked
+	// if we need to collect a profile before resuming; we leave resetting it to
+	// execute().
 }
 
 //go:nosplit

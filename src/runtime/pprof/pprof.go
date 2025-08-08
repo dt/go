@@ -389,7 +389,9 @@ type stackProfile [][]uintptr
 
 func (x stackProfile) Len() int              { return len(x) }
 func (x stackProfile) Stack(i int) []uintptr { return x[i] }
-func (x stackProfile) Label(i int) *labelMap { return nil }
+func (x stackProfile) Goroutine(i int) profilerecord.GoroutineRecord {
+	return profilerecord.GoroutineRecord{}
+}
 
 // A countProfile is a set of stack traces to be printed as counts
 // grouped by stack trace. There are multiple implementations:
@@ -398,7 +400,7 @@ func (x stackProfile) Label(i int) *labelMap { return nil }
 type countProfile interface {
 	Len() int
 	Stack(i int) []uintptr
-	Label(i int) *labelMap
+	Goroutine(i int) profilerecord.GoroutineRecord
 }
 
 // expandInlinedFrames copies the call stack from pcs into dst, expanding any
@@ -451,18 +453,37 @@ func printCountCycleProfile(w io.Writer, countName, cycleName string, records []
 
 // printCountProfile prints a countProfile at the specified debug level.
 // The profile will be in compressed proto format unless debug is nonzero.
+// Non-zero debug values have the following behaviors:
+//   - debug=1: text format, aggregated by unique stack, state and labels.
+//   - debug=2: handled elsewhere; the output of runtime.Stack().
+//   - debug=3: binary proto format matching debug=0, but with one entry per-goroutine.
+//   - debug=4: text format matching debug=1, but with one entry per-goroutine.
 func printCountProfile(w io.Writer, debug int, name string, p countProfile) error {
 	// Build count of each stack.
 	var buf strings.Builder
-	key := func(stk []uintptr, lbls *labelMap) string {
+	key := func(stk []uintptr, g profilerecord.GoroutineRecord) string {
 		buf.Reset()
 		fmt.Fprintf(&buf, "@")
 		for _, pc := range stk {
 			fmt.Fprintf(&buf, " %#x", pc)
 		}
-		if lbls != nil {
+
+		var extra []string
+		if debug > 1 {
+			extra = append(extra, "go::goroutine", fmt.Sprintf("%d", g.ID))
+			if g.ID != 1 {
+				extra = append(extra, "go::goroutine_created_by", fmt.Sprintf("%d", g.CreatorID))
+			}
+			extra = append(extra, "go::goroutine_state", pprof_gStatusString(g.State, g.WaitReason))
+			if mins := pprof_gWaitFor(g.State, g.WaitSince); mins > 0 {
+				extra = append(extra, "go::goroutine_wait_mins", fmt.Sprintf("%d", mins))
+			}
+			// TODO: Should creation func or location be added here too?
+		}
+
+		if l := labelsString((*labelMap)(g.Labels), extra...); l != "" {
 			buf.WriteString("\n# labels: ")
-			buf.WriteString(lbls.String())
+			buf.WriteString(l)
 		}
 		return buf.String()
 	}
@@ -471,7 +492,7 @@ func printCountProfile(w io.Writer, debug int, name string, p countProfile) erro
 	var keys []string
 	n := p.Len()
 	for i := 0; i < n; i++ {
-		k := key(p.Stack(i), p.Label(i))
+		k := key(p.Stack(i), p.Goroutine(i))
 		if count[k] == 0 {
 			index[k] = i
 			keys = append(keys, k)
@@ -481,7 +502,7 @@ func printCountProfile(w io.Writer, debug int, name string, p countProfile) erro
 
 	sort.Sort(&keysByCount{keys, count})
 
-	if debug > 0 {
+	if debug != 0 && debug != 3 {
 		// Print debug profile in legacy format
 		tw := tabwriter.NewWriter(w, 1, 8, 1, '\t', 0)
 		fmt.Fprintf(tw, "%s profile: total %d\n", name, p.Len())
@@ -506,15 +527,27 @@ func printCountProfile(w io.Writer, debug int, name string, p countProfile) erro
 		// return PCs, which is what appendLocsForStack expects.
 		locs = b.appendLocsForStack(locs[:0], p.Stack(index[k]))
 		idx := index[k]
-		var labels func()
-		if p.Label(idx) != nil {
-			labels = func() {
-				for _, lbl := range p.Label(idx).list {
+		var extra func()
+		g := p.Goroutine(idx)
+		if g.ID != 0 {
+			extra = func() {
+				if debug >= 3 {
+					b.pbLabelNum(tagSample_Label, "go::goroutine", int64(g.ID))
+					if g.ID != 1 {
+						b.pbLabelNum(tagSample_Label, "go::goroutine_created_by", int64(g.CreatorID))
+					}
+					b.pbLabel(tagSample_Label, "go::goroutine_state", pprof_gStatusString(g.State, g.WaitReason), 0)
+					if mins := pprof_gWaitFor(g.State, g.WaitSince); mins > 0 {
+						b.pbLabelNum(tagSample_Label, "go::goroutine_wait_mins", int64(mins))
+					}
+					// TODO: Should creation func or location be added here too?
+				}
+				for _, lbl := range (*labelMap)(g.Labels).list {
 					b.pbLabel(tagSample_Label, lbl.key, lbl.value, 0)
 				}
 			}
 		}
-		b.pbSample(values, locs, labels)
+		b.pbSample(values, locs, extra)
 	}
 	return b.build()
 }
@@ -729,7 +762,7 @@ func writeThreadCreate(w io.Writer, debug int) error {
 	// Until https://golang.org/issues/6104 is addressed, wrap
 	// ThreadCreateProfile because there's no point in tracking labels when we
 	// don't get any stack-traces.
-	return writeRuntimeProfile(w, debug, "threadcreate", func(p []profilerecord.StackRecord, _ []unsafe.Pointer) (n int, ok bool) {
+	return writeRuntimeProfile(w, debug, "threadcreate", func(p []profilerecord.StackRecord) (n int, ok bool) {
 		return pprof_threadCreateInternal(p)
 	})
 }
@@ -741,7 +774,7 @@ func countGoroutine() int {
 
 // writeGoroutine writes the current runtime GoroutineProfile to w.
 func writeGoroutine(w io.Writer, debug int) error {
-	if debug >= 2 {
+	if debug == 2 {
 		return writeGoroutineStacks(w)
 	}
 	return writeRuntimeProfile(w, debug, "goroutine", pprof_goroutineProfileWithLabels)
@@ -768,24 +801,28 @@ func writeGoroutineStacks(w io.Writer) error {
 	return err
 }
 
-func writeRuntimeProfile(w io.Writer, debug int, name string, fetch func([]profilerecord.StackRecord, []unsafe.Pointer) (int, bool)) error {
+type capturedStack interface {
+	GetStack() []uintptr
+	GetLabels() unsafe.Pointer
+	GetGoroutine() profilerecord.GoroutineRecord
+}
+
+func writeRuntimeProfile[T capturedStack](w io.Writer, debug int, name string, fetch func([]T) (int, bool)) error {
 	// Find out how many records there are (fetch(nil)),
 	// allocate that many records, and get the data.
 	// There's a race—more records might be added between
 	// the two calls—so allocate a few extra records for safety
 	// and also try again if we're very unlucky.
 	// The loop should only execute one iteration in the common case.
-	var p []profilerecord.StackRecord
-	var labels []unsafe.Pointer
-	n, ok := fetch(nil, nil)
+	var p []T
+	n, ok := fetch(nil)
 
 	for {
 		// Allocate room for a slightly bigger profile,
 		// in case a few more entries have been added
 		// since the call to ThreadProfile.
-		p = make([]profilerecord.StackRecord, n+10)
-		labels = make([]unsafe.Pointer, n+10)
-		n, ok = fetch(p, labels)
+		p = make([]T, n+10)
+		n, ok = fetch(p)
 		if ok {
 			p = p[0:n]
 			break
@@ -793,17 +830,14 @@ func writeRuntimeProfile(w io.Writer, debug int, name string, fetch func([]profi
 		// Profile grew; try again.
 	}
 
-	return printCountProfile(w, debug, name, &runtimeProfile{p, labels})
+	return printCountProfile(w, debug, name, runtimeProfile[T](p))
 }
 
-type runtimeProfile struct {
-	stk    []profilerecord.StackRecord
-	labels []unsafe.Pointer
-}
+type runtimeProfile[T capturedStack] []T
 
-func (p *runtimeProfile) Len() int              { return len(p.stk) }
-func (p *runtimeProfile) Stack(i int) []uintptr { return p.stk[i].Stack }
-func (p *runtimeProfile) Label(i int) *labelMap { return (*labelMap)(p.labels[i]) }
+func (p runtimeProfile[T]) Len() int                                      { return len(p) }
+func (p runtimeProfile[T]) Stack(i int) []uintptr                         { return p[i].GetStack() }
+func (p runtimeProfile[T]) Goroutine(i int) profilerecord.GoroutineRecord { return p[i].GetGoroutine() }
 
 var cpu struct {
 	sync.Mutex
@@ -967,7 +1001,7 @@ func writeProfileInternal(w io.Writer, debug int, name string, runtimeProfile fu
 }
 
 //go:linkname pprof_goroutineProfileWithLabels runtime.pprof_goroutineProfileWithLabels
-func pprof_goroutineProfileWithLabels(p []profilerecord.StackRecord, labels []unsafe.Pointer) (n int, ok bool)
+func pprof_goroutineProfileWithLabels(p []profilerecord.GoroutineRecord) (n int, ok bool)
 
 //go:linkname pprof_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond
 func pprof_cyclesPerSecond() int64
@@ -989,3 +1023,9 @@ func pprof_fpunwindExpand(dst, src []uintptr) int
 
 //go:linkname pprof_makeProfStack runtime.pprof_makeProfStack
 func pprof_makeProfStack() []uintptr
+
+//go:linkname pprof_gStatusString runtime.pprof_gStatusString
+func pprof_gStatusString(state uint32, reason uint8) string
+
+//go:linkname pprof_gWaitFor runtime.pprof_gWaitFor
+func pprof_gWaitFor(gpstatus uint32, waitsince int64) int64

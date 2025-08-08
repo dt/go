@@ -157,22 +157,31 @@ func (b *profileBuilder) pbValueType(tag int, typ, unit string) {
 }
 
 // pbSample encodes a Sample message to b.pb.
-func (b *profileBuilder) pbSample(values []int64, locs []uint64, labels func()) {
+func (b *profileBuilder) pbSample(values []int64, locs []uint64, extra func()) {
 	start := b.pb.startMessage()
 	b.pb.int64s(tagSample_Value, values)
 	b.pb.uint64s(tagSample_Location, locs)
-	if labels != nil {
-		labels()
+	if extra != nil {
+		extra()
 	}
 	b.pb.endMessage(tagProfile_Sample, start)
 	b.flush()
 }
 
-// pbLabel encodes a Label message to b.pb.
+// pbLabel encodes a Label message to b.pb, adding both strings (even if empty)
+// to the string map if needed.
 func (b *profileBuilder) pbLabel(tag int, key, str string, num int64) {
 	start := b.pb.startMessage()
 	b.pb.int64Opt(tagLabel_Key, b.stringIndex(key))
 	b.pb.int64Opt(tagLabel_Str, b.stringIndex(str))
+	b.pb.int64Opt(tagLabel_Num, num)
+	b.pb.endMessage(tag, start)
+}
+
+// pbLabel encodes a Label message to b.pb, with only a num component.
+func (b *profileBuilder) pbLabelNum(tag int, key string, num int64) {
+	start := b.pb.startMessage()
+	b.pb.int64Opt(tagLabel_Key, b.stringIndex(key))
 	b.pb.int64Opt(tagLabel_Num, num)
 	b.pb.endMessage(tag, start)
 }
