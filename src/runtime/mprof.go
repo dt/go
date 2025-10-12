@@ -1368,6 +1368,7 @@ func goroutineProfileWithLabelsConcurrent(p []profilerecord.StackRecord, labels 
 	}
 
 	semacquire(&goroutineProfile.sema)
+	profileStartGeneration.Add(1) // Increment generation when goroutine profiling starts
 
 	ourg := getg()
 

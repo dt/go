@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 )
 
 type label struct {
@@ -24,12 +25,9 @@ type LabelSet struct {
 // labelContextKey is the type of contextKeys used for profiler labels.
 type labelContextKey struct{}
 
-func labelValue(ctx context.Context) labelMap {
+func labelValue(ctx context.Context) *labelMap {
 	labels, _ := ctx.Value(labelContextKey{}).(*labelMap)
-	if labels == nil {
-		return labelMap{}
-	}
-	return *labels
+	return labels
 }
 
 // labelMap is the representation of the label set held in the context type.
@@ -38,6 +36,32 @@ func labelValue(ctx context.Context) labelMap {
 type labelMap struct {
 	LabelSet
 }
+
+// labelCtx is a tiny wrapper context we can pool internally.
+type labelCtx struct {
+	context.Context
+	lm *labelMap
+}
+
+func (c *labelCtx) Value(key any) any {
+	if _, ok := key.(labelContextKey); ok {
+		return c.lm
+	}
+	return c.Context.Value(key)
+}
+
+// runtime_profileStartGeneration is defined in runtime/cpuprof.go.
+// It increments each time CPU or goroutine profiling starts.
+func runtime_profileStartGeneration() uint64
+
+var (
+	labelMapPool = sync.Pool{
+		New: func() any { return new(labelMap) },
+	}
+	labelCtxPool = sync.Pool{
+		New: func() any { return new(labelCtx) },
+	}
+)
 
 // String satisfies Stringer and returns key, value pairs in a consistent
 // order.
@@ -58,8 +82,17 @@ func (l *labelMap) String() string {
 // WithLabels returns a new [context.Context] with the given labels added.
 // A label overwrites a prior label with the same key.
 func WithLabels(ctx context.Context, labels LabelSet) context.Context {
+	lm := labelMapPool.Get().(*labelMap)
 	parentLabels := labelValue(ctx)
-	return context.WithValue(ctx, labelContextKey{}, &labelMap{mergeLabelSets(parentLabels.LabelSet, labels)})
+	if parentLabels == nil {
+		lm.LabelSet = labels
+	} else {
+		lm.LabelSet = mergeLabelSets(parentLabels.LabelSet, labels)
+	}
+	lc := labelCtxPool.Get().(*labelCtx)
+	lc.Context = ctx
+	lc.lm = lm
+	return lc
 }
 
 func mergeLabelSets(left, right LabelSet) LabelSet {
@@ -131,6 +164,9 @@ func Labels(args ...string) LabelSet {
 // whether that label exists.
 func Label(ctx context.Context, key string) (string, bool) {
 	ctxLabels := labelValue(ctx)
+	if ctxLabels == nil {
+		return "", false
+	}
 	for _, lbl := range ctxLabels.list {
 		if lbl.key == key {
 			return lbl.value, true
@@ -143,6 +179,9 @@ func Label(ctx context.Context, key string) (string, bool) {
 // The function f should return true to continue iteration or false to stop iteration early.
 func ForLabels(ctx context.Context, f func(key, value string) bool) {
 	ctxLabels := labelValue(ctx)
+	if ctxLabels == nil {
+		return
+	}
 	for _, lbl := range ctxLabels.list {
 		if !f(lbl.key, lbl.value) {
 			break

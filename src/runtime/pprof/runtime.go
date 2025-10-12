@@ -51,8 +51,23 @@ func SetGoroutineLabels(ctx context.Context) {
 // The augmented label map will be set for the duration of the call to f
 // and restored once f returns.
 func Do(ctx context.Context, labels LabelSet, f func(context.Context)) {
-	defer SetGoroutineLabels(ctx)
-	ctx = WithLabels(ctx, labels)
-	SetGoroutineLabels(ctx)
-	f(ctx)
+	// Read the current profiler generation. If it changes during f's execution,
+	// a profiler started and may have captured our labelMap, so we must not
+	// return it to the pool for reuse.
+	gen := runtime_profileStartGeneration()
+	ctx2 := WithLabels(ctx, labels)
+	SetGoroutineLabels(ctx2)
+	defer func() {
+		SetGoroutineLabels(ctx)
+		if lc, ok := ctx2.(*labelCtx); ok {
+			if lc.lm != nil && runtime_profileStartGeneration() == gen {
+				lc.lm.LabelSet.list = lc.lm.LabelSet.list[:0]
+				labelMapPool.Put(lc.lm)
+			}
+			lc.Context = nil
+			lc.lm = nil
+			labelCtxPool.Put(lc)
+		}
+	}()
+	f(ctx2)
 }

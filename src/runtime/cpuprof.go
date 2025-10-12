@@ -14,9 +14,14 @@ package runtime
 
 import (
 	"internal/abi"
+	"internal/runtime/atomic"
 	"internal/runtime/sys"
 	"unsafe"
 )
+
+// profileStartGeneration is incremented each time CPU or goroutine profiling starts.
+// runtime/pprof uses this to detect when a labelMap may have been captured by the profiler.
+var profileStartGeneration atomic.Uint64
 
 const (
 	maxCPUProfStack = 64
@@ -83,6 +88,7 @@ func SetCPUProfileRate(hz int) {
 		}
 
 		cpuprof.on = true
+		profileStartGeneration.Add(1) // Increment generation when profiling starts
 		cpuprof.log = newProfBuf(1, profBufWordCount, profBufTagCount)
 		hdr := [1]uint64{uint64(hz)}
 		cpuprof.log.write(nil, nanotime(), hdr[:], nil)
@@ -207,6 +213,13 @@ func (p *cpuProfile) addExtra() {
 // or the [testing] package's -test.cpuprofile flag instead.
 func CPUProfile() []byte {
 	panic("CPUProfile no longer available")
+}
+
+// runtime/pprof.runtime_profileStartGeneration is defined in runtime/pprof/label.go.
+//
+//go:linkname pprof_profileStartGeneration runtime/pprof.runtime_profileStartGeneration
+func pprof_profileStartGeneration() uint64 {
+	return profileStartGeneration.Load()
 }
 
 // runtime/pprof.runtime_cyclesPerSecond should be an internal detail,
