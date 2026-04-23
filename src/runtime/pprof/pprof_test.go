@@ -1463,11 +1463,11 @@ func TestGoroutineCounts(t *testing.T) {
 	goroutineProf.WriteTo(&w, 1)
 	prof := w.String()
 
-	labels := labelMap{label.NewSet(Labels("label", "value").list)}
+	labels := labelMap{Set: label.NewSet(Labels("label", "value").list)}
 	labelStr := "\n# labels: " + labels.String()
-	selfLabel := labelMap{label.NewSet(Labels("self-label", "self-value").list)}
+	selfLabel := labelMap{Set: label.NewSet(Labels("self-label", "self-value").list)}
 	selfLabelStr := "\n# labels: " + selfLabel.String()
-	fingLabel := labelMap{label.NewSet(Labels("fing-label", "fing-value").list)}
+	fingLabel := labelMap{Set: label.NewSet(Labels("fing-label", "fing-value").list)}
 	fingLabelStr := "\n# labels: " + fingLabel.String()
 	orderedPrefix := []string{
 		"\n50 @ ",

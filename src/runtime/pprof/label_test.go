@@ -94,12 +94,12 @@ func TestLabelMapStringer(t *testing.T) {
 			expected: "{}",
 		}, {
 			m: labelMap{
-				label.NewSet(Labels("foo", "bar").list),
+				Set: label.NewSet(Labels("foo", "bar").list),
 			},
 			expected: `{"foo":"bar"}`,
 		}, {
 			m: labelMap{
-				label.NewSet(Labels(
+				Set: label.NewSet(Labels(
 					"foo", "bar",
 					"key1", "value1",
 					"key2", "value2",

@@ -1287,7 +1287,11 @@ func goroutineheader(gp *g) {
 				}
 				printq(kv.Key)
 				print(": ")
-				printq(kv.Value)
+				if kv.Value == "" && kv.IntVal != 0 {
+					printint(kv.IntVal)
+				} else {
+					printq(kv.Value)
+				}
 				if i < len(labels)-1 {
 					print(", ")
 				}

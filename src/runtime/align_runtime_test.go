@@ -32,6 +32,7 @@ var AtomicFields = []uintptr{
 	unsafe.Offsetof(mstats{}.last_gc_nanotime),
 	unsafe.Offsetof(mstats{}.last_gc_unix),
 	unsafe.Offsetof(workType{}.bytesMarked),
+	unsafe.Offsetof(profLabelMap{}.refs),
 }
 
 // AtomicVariables is the set of global variables on which we perform

@@ -1357,6 +1357,7 @@ func goroutineProfileWithLabelsConcurrent(p []profilerecord.StackRecord, labels 
 	ourg := getg()
 
 	pcbuf := makeProfStack() // see saveg() for explanation
+	profLabelBumpEpoch()
 	stw := stopTheWorld(stwGoroutineProfile)
 	// Using gcount while the world is stopped should give us a consistent view
 	// of the number of live goroutines, minus the number of goroutines that are

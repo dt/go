@@ -8,10 +8,13 @@
 // preventing the use of a type-alias in an existing public interface.
 package label
 
-// Label is a key/value pair of strings.
+// Label is a key/value pair. A label holds either a string value (Value)
+// or an integer value (IntVal). When IntVal is non-zero and Value is empty,
+// the label is treated as an integer label.
 type Label struct {
-	Key   string
-	Value string
+	Key    string
+	Value  string
+	IntVal int64
 }
 
 // Set is a set of labels.

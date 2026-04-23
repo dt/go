@@ -29,6 +29,15 @@ func runtime_setProfLabel(labels unsafe.Pointer)
 // runtime_getProfLabel is defined in runtime/proflabel.go.
 func runtime_getProfLabel() unsafe.Pointer
 
+// runtime_profLabelGet is defined in runtime/proflabel.go.
+func runtime_profLabelGet() unsafe.Pointer
+
+// runtime_profLabelRelease is defined in runtime/proflabel.go.
+func runtime_profLabelRelease(p unsafe.Pointer)
+
+// profLabelBumpEpoch is defined in runtime/proflabel.go.
+func profLabelBumpEpoch()
+
 // runtime_goroutineleakcount is defined in runtime/proc.go.
 func runtime_goroutineleakcount() int
 

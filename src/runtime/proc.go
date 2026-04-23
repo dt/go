@@ -4526,6 +4526,7 @@ func gdestroy(gp *g) {
 	gp.writebuf = nil
 	gp.waitreason = waitReasonZero
 	gp.param = nil
+	profLabelRelease((*profLabelMap)(gp.labels))
 	gp.labels = nil
 	gp.timer = nil
 	gp.bubble = nil
@@ -5392,6 +5393,7 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
 		newg.bubble = callergp.bubble
 		if mp.curg != nil {
 			newg.labels = mp.curg.labels
+			profLabelAddRef((*profLabelMap)(newg.labels))
 		}
 		if goroutineProfile.active {
 			// A concurrent goroutine profile is running. It should include

@@ -368,7 +368,7 @@ func (b *profileBuilder) build() error {
 		if e.tag != nil {
 			labels = func() {
 				for _, lbl := range (*labelMap)(e.tag).Set.List {
-					b.pbLabel(tagSample_Label, lbl.Key, lbl.Value, 0)
+					b.pbLabel(tagSample_Label, lbl.Key, lbl.Value, lbl.IntVal)
 				}
 			}
 		}
@@ -376,6 +376,14 @@ func (b *profileBuilder) build() error {
 		locs = b.appendLocsForStack(locs[:0], e.stk)
 
 		b.pbSample(values, locs, labels)
+	}
+
+	// Release profiler references to pooled labelMaps. Non-pooled
+	// maps (from the existing Do/WithLabels API) are no-ops.
+	for e := b.m.all; e != nil; e = e.nextAll {
+		if e.tag != nil {
+			runtime_profLabelRelease(e.tag)
+		}
 	}
 
 	for i, m := range b.mem {

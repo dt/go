@@ -840,6 +840,10 @@ type p struct {
 	// pinner creation.
 	pinnerCache *pinner
 
+	// P-local free list of profLabelMaps, used by the pooled pprof label API.
+	labelCache    *profLabelMap
+	labelCacheLen int
+
 	trace pTraceState
 
 	palloc persistentAlloc // per-P to avoid mutex

@@ -83,6 +83,7 @@ func SetCPUProfileRate(hz int) {
 		}
 
 		cpuprof.on = true
+		profLabelBumpEpoch()
 		cpuprof.log = newProfBuf(1, profBufWordCount, profBufTagCount)
 		hdr := [1]uint64{uint64(hz)}
 		cpuprof.log.write(nil, nanotime(), hdr[:], nil)

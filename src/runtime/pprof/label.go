@@ -10,6 +10,7 @@ import (
 	"internal/runtime/pprof/label"
 	"slices"
 	"strings"
+	"unsafe"
 )
 
 // LabelSet is a set of labels.
@@ -31,8 +32,14 @@ func labelValue(ctx context.Context) labelMap {
 // labelMap is the representation of the label set held in the context type.
 // This is an initial implementation, but it will be replaced with something
 // that admits incremental immutable modification more efficiently.
+//
+// The layout must be compatible with profLabelMap in runtime/proflabel.go:
+// label.Set first, then next pointer, then refs. For non-pooled labelMaps,
+// next is nil and refs is 0, which tells profLabelRelease to skip them.
 type labelMap struct {
 	label.Set
+	next unsafe.Pointer // unused; layout compat with profLabelMap
+	refs int64          // always 0 for non-pooled maps
 }
 
 // String satisfies Stringer and returns key, value pairs in a consistent
@@ -55,7 +62,7 @@ func (l *labelMap) String() string {
 // A label overwrites a prior label with the same key.
 func WithLabels(ctx context.Context, labels LabelSet) context.Context {
 	parentLabels := labelValue(ctx)
-	return context.WithValue(ctx, labelContextKey{}, &labelMap{mergeLabelSets(parentLabels.Set, labels)})
+	return context.WithValue(ctx, labelContextKey{}, &labelMap{Set: mergeLabelSets(parentLabels.Set, labels)})
 }
 
 func mergeLabelSets(left label.Set, right LabelSet) label.Set {
@@ -145,4 +152,189 @@ func ForLabels(ctx context.Context, f func(key, value string) bool) {
 			break
 		}
 	}
+}
+
+// LabelValue is an opaque value for use with [SetLabel]. It can hold either
+// a string or an integer. Use [Str] to create a string value and [Int] to
+// create an integer value. The zero value represents an empty/absent label.
+//
+// LabelValue is a value type (24 bytes) with unexported fields. Callers can
+// create values and receive old ones back from [SetLabel], but cannot inspect
+// what was returned — they can only pass it back to [SetLabel] for restore.
+type LabelValue struct {
+	s string
+	n int64
+}
+
+// Str returns a [LabelValue] holding the string s.
+func Str(s string) LabelValue {
+	return LabelValue{s: s}
+}
+
+// Int returns a [LabelValue] holding the integer n. The value will be
+// serialized as a pprof Label.num field, avoiding the cost of formatting
+// the integer to a string at labeling time.
+func Int(n int64) LabelValue {
+	return LabelValue{n: n}
+}
+
+// SetLabel sets a single profiling label on the current goroutine and returns
+// the previous value for that key. Labels persist until replaced or the
+// goroutine exits. Child goroutines inherit the parent's labels.
+//
+// The returned previous value enables scoped label restore via defer:
+//
+//	defer pprof.SetLabel("req", pprof.SetLabel("req", pprof.Str(reqID)))
+//
+// The inner call sets the label and returns the old value. The deferred outer
+// call restores it. All values are passed and returned by value — no closures,
+// no heap allocations (after pool warmup).
+func SetLabel(key string, val LabelValue) LabelValue {
+	cur := (*label.Set)(runtime_getProfLabel())
+
+	// Find old value for this key.
+	var old LabelValue
+	if cur != nil {
+		for _, lbl := range cur.List {
+			if lbl.Key == key {
+				old = LabelValue{s: lbl.Value, n: lbl.IntVal}
+				break
+			}
+		}
+	}
+
+	// Claim a new pooled labelMap and populate it.
+	newMap := (*label.Set)(runtime_profLabelGet())
+	if cur != nil {
+		// Copy existing labels, replacing the key if found.
+		found := false
+		for _, lbl := range cur.List {
+			if lbl.Key == key {
+				found = true
+				if val.s != "" || val.n != 0 {
+					newMap.List = append(newMap.List, label.Label{Key: key, Value: val.s, IntVal: val.n})
+				}
+				// else: zero LabelValue means remove the label
+			} else {
+				newMap.List = append(newMap.List, lbl)
+			}
+		}
+		if !found && (val.s != "" || val.n != 0) {
+			newMap.List = append(newMap.List, label.Label{Key: key, Value: val.s, IntVal: val.n})
+		}
+	} else if val.s != "" || val.n != 0 {
+		newMap.List = append(newMap.List, label.Label{Key: key, Value: val.s, IntVal: val.n})
+	}
+
+	// Release the old map and install the new one.
+	runtime_profLabelRelease(unsafe.Pointer(cur))
+	runtime_setProfLabel(unsafe.Pointer(newMap))
+
+	return old
+}
+
+// LabelsBuilder accumulates labels for a batch [SetLabels] call.
+// Use [NewLabels] to create a builder.
+type LabelsBuilder struct {
+	labels []label.Label
+}
+
+// NewLabels returns a new [LabelsBuilder] for constructing a batch label set.
+func NewLabels() LabelsBuilder {
+	return LabelsBuilder{}
+}
+
+// Str adds a string label to the builder and returns the builder for chaining.
+func (b LabelsBuilder) Str(key, val string) LabelsBuilder {
+	b.labels = append(b.labels, label.Label{Key: key, Value: val})
+	return b
+}
+
+// Int adds an integer label to the builder and returns the builder for chaining.
+func (b LabelsBuilder) Int(key string, val int64) LabelsBuilder {
+	b.labels = append(b.labels, label.Label{Key: key, IntVal: val})
+	return b
+}
+
+// SetLabels sets all labels in the builder on the current goroutine in a
+// single operation, and returns a builder containing the old values for
+// all keys that were set. This enables scoped batch restore via defer:
+//
+//	defer pprof.SetLabels(pprof.SetLabels(
+//	    pprof.NewLabels().Str("req", reqID).Int("job", 123),
+//	))
+func SetLabels(b LabelsBuilder) LabelsBuilder {
+	cur := (*label.Set)(runtime_getProfLabel())
+
+	// Build the restore builder with old values for each key.
+	var restore LabelsBuilder
+	for _, blbl := range b.labels {
+		var found bool
+		if cur != nil {
+			for _, lbl := range cur.List {
+				if lbl.Key == blbl.Key {
+					restore.labels = append(restore.labels, lbl)
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			// Key was not previously set; restore to zero (removal).
+			restore.labels = append(restore.labels, label.Label{Key: blbl.Key})
+		}
+	}
+
+	// Claim a new pooled labelMap and populate it.
+	newMap := (*label.Set)(runtime_profLabelGet())
+
+	// Copy existing labels, replacing any that match new keys.
+	if cur != nil {
+		for _, lbl := range cur.List {
+			if newLbl, found := builderFind(b, lbl.Key); found {
+				if newLbl.Value != "" || newLbl.IntVal != 0 {
+					newMap.List = append(newMap.List, newLbl)
+				}
+				// else: zero value means remove
+			} else {
+				newMap.List = append(newMap.List, lbl)
+			}
+		}
+	}
+	// Add any new keys that weren't in the existing set.
+	for _, lbl := range b.labels {
+		if lbl.Value == "" && lbl.IntVal == 0 {
+			continue // removal, already handled above
+		}
+		if cur == nil || !setHasKey(cur, lbl.Key) {
+			newMap.List = append(newMap.List, lbl)
+		}
+	}
+
+	// Release the old map and install the new one.
+	runtime_profLabelRelease(unsafe.Pointer(cur))
+	runtime_setProfLabel(unsafe.Pointer(newMap))
+
+	return restore
+}
+
+// builderFind searches b for a label with the given key. Linear scan;
+// label sets are typically small (< 10 keys).
+func builderFind(b LabelsBuilder, key string) (label.Label, bool) {
+	for _, lbl := range b.labels {
+		if lbl.Key == key {
+			return lbl, true
+		}
+	}
+	return label.Label{}, false
+}
+
+// setHasKey reports whether s contains a label with the given key.
+func setHasKey(s *label.Set, key string) bool {
+	for _, lbl := range s.List {
+		if lbl.Key == key {
+			return true
+		}
+	}
+	return false
 }

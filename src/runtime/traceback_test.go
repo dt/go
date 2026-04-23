@@ -917,7 +917,7 @@ func TestTracebackGoroutineLabels(t *testing.T) {
 				// false to runtime.Stack). We expect to see the parent's goroutine labels in the traceback.
 				stack := string(buf[:runtime.Stack(buf, false)])
 				if !strings.Contains(stack, tbl.expTB+":") {
-					t.Errorf("failed to find goroutine labels with labels %s (as %s) got:\n%s\n---", tbl.l, tbl.expTB, stack)
+					t.Errorf("failed to find goroutine labels with labels %v (as %s) got:\n%s\n---", tbl.l, tbl.expTB, stack)
 				}
 			}
 			// Use a clean context so the testing package can add whatever goroutine labels it wants to the testing.T context.
@@ -943,7 +943,7 @@ func TestTracebackGoroutineLabelsDisabledGODEBUG(t *testing.T) {
 		// false to runtime.Stack).
 		stack := string(buf[:runtime.Stack(buf, false)])
 		if strings.Contains(stack, " {foobar: baz}:") {
-			t.Errorf("found goroutine labels with labels %s  got:\n%s\n---", lbls, stack)
+			t.Errorf("found goroutine labels with labels %v  got:\n%s\n---", lbls, stack)
 		}
 	}
 	// Use a clean context so the testing package can add whatever goroutine labels it wants to the testing.T context.
